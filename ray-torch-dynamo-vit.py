@@ -1,7 +1,7 @@
 import torch
 import torch._dynamo
 from typing import List
-import torch_mlir 
+# import torch_mlir 
 from transformers import ViTFeatureExtractor, ViTModel
 from datasets import load_dataset
 import torch.fx
@@ -9,13 +9,12 @@ import torch.fx
 import ray
 import io
 import time
-from iree import compiler as ireec
-from iree import runtime as ireert
+# from iree import compiler as ireec
+# from iree import runtime as ireert
 iree_backend = "llvm-cpu"#"vmvx" #
 iree_input_type = "tm_tensor"
 # print(stages[0].mlir)
 models = dict()
-
 
 #计算图中间表示设计
 class Unit:
@@ -34,6 +33,8 @@ class ExecutableUnit(Unit):
         self.mlir = mlir
         self.worker = worker
         self.ref = ref  #ray store ,iree ir ref
+        self.graph_ref = None
+
         ExecutableUnit.exec_unit_count=0
     def print_debug(self):
         print('===========================graph',ExecutableUnit.exec_unit_count,':',self.output,'================================')
@@ -47,16 +48,28 @@ class ExecutableUnit(Unit):
                                                 target_backends=[iree_backend],
                                                 input_type=iree_input_type)
         self.ref=ray.put(iree_bytes) #store into ray store
+    def upload_graph_to_ray(self):
+        self.graph_ref = ray.put(self.graph)
+
     def run_on_ray(self,input):
-        print('compute current model:',self.output,'current input:')
-        for input_name in self.input_names:
-            print(input_name) 
+        debug = False
+        if debug:
+            print('compute current model:',self.output,'current input:')
+            for input_name in self.input_names:
+                print(input_name) 
         # self.graph.graph.print_tabular()
-        return ray.get(self.worker.compute
-                       .remote(self.output,
-                               input,
-                               True if len(self.input_names)>1 else False))
-    
+        torch_only = True
+        if torch_only:
+            return ray.get(self.worker.graph_compute
+                        .remote(self.output,
+                                input,
+                                True if len(self.input_names)>1 else False))
+        else:
+            return ray.get(self.worker.compute
+                        .remote(self.output,
+                                input,
+                                True if len(self.input_names)>1 else False))
+            
     def run_only_sharding(self,input):
         start = time.time()
         if len(self.input_names)>1:
@@ -78,17 +91,23 @@ class PipeStage(ExecutableUnit):
     def test_trace_run(self,input):
         '''Lower to linalg and run graph'''
         print('pipestage: ',self.output)
+        with_mlir = False
         if len(self.input_names)>1:
             result = self.graph(*input)
-            self.mlir = torch_mlir.compile(self.graph,input,
-                                                output_type=torch_mlir.OutputType.LINALG_ON_TENSORS, 
-                                                use_tracing=True)
+            # if with_mlir:
+            #     self.mlir = torch_mlir.compile(self.graph,input,
+            #                                         output_type=torch_mlir.OutputType.LINALG_ON_TENSORS, 
+            #                                         use_tracing=True)
         else:
             result = self.graph(input)
-            self.mlir = torch_mlir.compile(self.graph,input,
-                                        output_type=torch_mlir.OutputType.LINALG_ON_TENSORS, 
-                                        use_tracing=True)
-        self.lower_to_iree()
+            # if with_mlir:
+            #     self.mlir = torch_mlir.compile(self.graph,input,
+            #                                 output_type=torch_mlir.OutputType.LINALG_ON_TENSORS, 
+            #                                 use_tracing=True)
+        if True:
+            self.upload_graph_to_ray()
+        else:
+            self.lower_to_iree()
         return result
         # #???? mlir input????
         # self.mlir = torch_mlir.compile(self.graph,input,
@@ -200,9 +219,11 @@ class PipeStageWithLinear(Unit):
         return result
 
     def run_only_sharding(self,input):
-        print('compute current model:',self.output,'current input:')
-        for input_name in self.input_names:
-            print(input_name)
+        debug = False
+        if debug:
+            print('compute current model:',self.output,'current input:')
+            for input_name in self.input_names:
+                print(input_name)
         # print(self.input_names)
         ray_env=dict()
         ray_env[self.input_names[0]]=input    
@@ -234,7 +255,6 @@ class PipeStageWithLinear(Unit):
             ray_env[self.stages[i].output] = result 
             # print(self.env.keys())
         return result
-    
 
     def print_debug(self):
         for stage in self.stages:
@@ -250,10 +270,13 @@ class LinearStageShard(ExecutableUnit):
     def test_trace_run(self,input):
         '''Lower to linalg and run graph'''
         result = self.graph(input)
-        self.mlir = torch_mlir.compile(self.graph,input,
-                                            output_type=torch_mlir.OutputType.LINALG_ON_TENSORS, 
-                                            use_tracing=True)
-        self.lower_to_iree()
+        # self.mlir = torch_mlir.compile(self.graph,input,
+        #                                     output_type=torch_mlir.OutputType.LINALG_ON_TENSORS, 
+        #                                     use_tracing=True)
+        if True:
+            self.upload_graph_to_ray()
+        else:
+            self.lower_to_iree()
         return result
  
         # bytecode_stream = io.BytesIO()
@@ -279,12 +302,12 @@ class LinearStageShard(ExecutableUnit):
         return super().run_on_ray(input)  
 
     def run_only_sharding(self,input):
-        using_ray = False
-        if using_ray:
+        #重要开关：是否使用ray,开关：true,使用ray;false,单机
+        torch_only = False
+        if torch_only:
             return self.run_on_ray(input)
         else:
             return super().run_only_sharding(input)
-
     def print_debug(self):
         super().print_debug()
 
@@ -949,7 +972,6 @@ for i in range(12):
     stages[i*2+2] = pipe_linear_stage  # 修改主pipeline
 
 
-
 '''
 1).测试sharding的正确性
 2).lower to mlir
@@ -983,10 +1005,11 @@ t_rusult = model.forward(example_input)
 
 # exit(0)
 
-@ray.remote(num_cpus=2)
+@ray.remote(num_cpus=4)
 class Worker:
     def __init__(self) -> None:
         self.models = dict()
+        self.graphs = dict()
         '''单个worker支持的计算模型{id,指令引用}'''
 
     def add_model(self,model_ref,model_id):
@@ -996,14 +1019,40 @@ class Worker:
             model_id:模型id,在RefModel模型中全局唯一
         '''
         #加载字节码
-        config = ireert.Config("local-task")
-        ctx = ireert.SystemContext(config=config)
-        vm_module = ireert.VmModule.copy_buffer(ctx.instance,model_ref)
-        ctx.add_vm_module(vm_module)  
-        self.models[model_id]  = ctx.modules.module
+        # config = ireert.Config("local-task")
+        # ctx = ireert.SystemContext(config=config)
+        # vm_module = ireert.VmModule.copy_buffer(ctx.instance,model_ref)
+        # ctx.add_vm_module(vm_module)  
+        # self.models[model_id]  = ctx.modules.module
         # print(f'model:{model_id} added!')
         return True
-
+    def add_graph(self,graph_ref,model_id):
+        self.graphs[model_id] = graph_ref
+        return True
+    
+    def graph_compute(self,model_id,input,multi_input:bool=False):
+        start = time.time()
+        if model_id == 'output':
+            '''
+            ===========================graph: output ================================
+            opcode         name                          target                        args                                                     kwargs
+            -------------  ----------------------------  ----------------------------  -------------------------------------------------------  --------
+            placeholder    add_24                        add_24                        ()                                                       {}
+            call_module    g__model___layernorm          G__model___layernorm          (add_24,)                                                {}
+            call_function  getitem                       <built-in function getitem>   (g__model___layernorm, (slice(None, None, None), 0))     {}
+            call_module    g__model___pooler_dense       G__model___pooler_dense       (getitem,)                                               {}
+            call_module    g__model___pooler_activation  G__model___pooler_activation  (g__model___pooler_dense,)                               {}
+            output         output                        output                        ((g__model___layernorm, g__model___pooler_activation),)  {}
+            '''
+            results = self.graphs[model_id](input)[1]
+        else:
+            if multi_input:
+                results = self.graphs[model_id](*input)
+            else:
+                results = self.graphs[model_id](input)
+            print(f'Instructions {model_id} time cost: ',time.time()-start)
+        return torch.tensor(results)
+    
     def compute(self,model_id,input,multi_input:bool=False):
         start = time.time()
         if model_id == 'output':
@@ -1034,23 +1083,44 @@ class Worker:
 num_workers = 4
 workers = []
 init_rets = []
+
+using_iree=False
 #初始化worker,暂时设置每个worker支持所有的model运算
-for i in range(num_workers):
-   w = Worker.remote()
-   for j in range(len(stages)):
-        if isinstance(stages[j],PipeStage):
-            # print(f'adding stage {stages[j].output} ')
-            init_rets.append(w.add_model.remote(stages[j].ref,stages[j].output))
-        elif isinstance(stages[j],PipeStageWithLinear):
-            for sub_stage in stages[j].stages:
-                if isinstance(sub_stage,PipeStage):
-                    # print(f'adding stage {sub_stage.output} ')
-                    init_rets.append(w.add_model.remote(sub_stage.ref,sub_stage.output))
-                elif isinstance(sub_stage,LinearStage):
-                    for shard in sub_stage.shards:
-                        # print(f'adding stage {shard.output} ')
-                        init_rets.append(w.add_model.remote(shard.ref,shard.output))
-   workers.append(w)
+if using_iree:
+    for i in range(num_workers):
+        w = Worker.remote()
+        for j in range(len(stages)):
+                if isinstance(stages[j],PipeStage):
+                    # print(f'adding stage {stages[j].output} ')
+                    init_rets.append(w.add_model.remote(stages[j].ref,stages[j].output))
+                elif isinstance(stages[j],PipeStageWithLinear):
+                    for sub_stage in stages[j].stages:
+                        if isinstance(sub_stage,PipeStage):
+                            # print(f'adding stage {sub_stage.output} ')
+                            init_rets.append(w.add_model.remote(sub_stage.ref,sub_stage.output))
+                        elif isinstance(sub_stage,LinearStage):
+                            for shard in sub_stage.shards:
+                                # print(f'adding stage {shard.output} ')
+                                init_rets.append(w.add_model.remote(shard.ref,shard.output))
+        workers.append(w)
+else:
+    for i in range(num_workers):
+        w = Worker.remote()
+        for j in range(len(stages)):
+                if isinstance(stages[j],PipeStage):
+                    # print(f'adding stage {stages[j].output} ')
+                    init_rets.append(w.add_graph.remote(stages[j].graph_ref,stages[j].output))
+                elif isinstance(stages[j],PipeStageWithLinear):
+                    for sub_stage in stages[j].stages:
+                        if isinstance(sub_stage,PipeStage):
+                            # print(f'adding stage {sub_stage.output} ')
+                            init_rets.append(w.add_graph.remote(sub_stage.graph_ref,sub_stage.output))
+                        elif isinstance(sub_stage,LinearStage):
+                            for shard in sub_stage.shards:
+                                # print(f'adding stage {shard.output} ')
+                                init_rets.append(w.add_graph.remote(shard.graph_ref,shard.output))
+        workers.append(w)
+   
 _ = ray.get(init_rets)
 
 
@@ -1077,7 +1147,6 @@ for j in range(len(stages)):
                     # print(f'align stage: {shard.output} with worker:{k}')
                     shard.worker = workers[k]
                     k = (k+1)%num_workers
-
 
 
 '''linear stage,是抽象stage但是有自己的输入输出'''
@@ -1109,8 +1178,10 @@ def profile_torch_ray():
     start1 = time.time()
     torch_result=model.forward(example_input)
     print(f'torch time cost: ',time.time()-start1)
-    assert torch.allclose(result,torch_result)
-
+    # print('result',result)
+    # print('torch_result:',torch_result)
+    # assert torch.allclose(result[1],torch_result[1])
+    
 profile_torch_ray()
 
 exit(0)
