@@ -102,9 +102,9 @@ def generate_group(total_features=0, nranks=4):
     assert total_features % nranks == 0
     ret = []
     for i in range(nranks):
-        interval = total_features/nranks
-        start = int(i * interval)
-        ret.append([range(start, int(start+interval))])
+        interval = total_features // nranks  # Use integer division
+        start = i * interval
+        ret.append(list(range(start, start + interval)))  # Removed extra brackets
     return ret
 
 
