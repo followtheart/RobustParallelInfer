@@ -193,7 +193,10 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
                 
 
                 print ("***************" * 10)
-
+            else:
+                new_node = fix_arg(node,replace_tables)
+                sub_graphs.graph.node_copy(new_node)
+                sub_graphs.add_submodule(node.target,module)
                
                 
 
@@ -232,10 +235,9 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
     sub_graphs.recompile()
     sub_graphs.eval()
     
-
     # sub_graphs[i].graph.print_tabular()
     mod = torch.jit.trace(sub_graphs, [tokens_tensor])
-    mod.save(f'vicuna-7b-v1.5-{irank}.pt')
+    mod.save(f'tiny-llama-{irank}.pt')
     sub_graphs.graph.print_tabular()
     return gm.forward
 
