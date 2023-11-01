@@ -1,3 +1,13 @@
+###partition vicuna  model
+```
+#partition
+mpirun -np 2 python dynamo-vicuna.py
+
+#convert into ncnn
+mpirun -np 2 ~/ncnn/tools/pnnx/build/src/pnnx vicuna-7b-v1.5-1.pt inputshape=[2,128]i32 customop=~/ncnn/tools/pnnx/build/src/mpi_extensions/libmpi_extension
+s.so
+```
+
 ### ModuleNotFoundError: No module named 'torch'
 torch-mlir env
 solution:
