@@ -79,6 +79,7 @@ def linear_sharding(linear: torch.nn.Linear = None, group=[], split_output: bool
     for i in range(len(group)):
         if split_output:
             '''拆分output'''
+
             sub_linear = torch.nn.Linear(linear.in_features, len(group[i]))
             sub_linear.weight = torch.nn.Parameter(torch.squeeze(linear.weight[group[i], :].clone()))
             if linear.bias is not None:
@@ -89,6 +90,21 @@ def linear_sharding(linear: torch.nn.Linear = None, group=[], split_output: bool
             sub_linear.weight = torch.nn.Parameter(linear.weight[:, group[i]].clone())
         
         result.append(sub_linear)
+#    for i in range(len(group)):
+#        if split_output:
+#            '''拆分output'''
+#            sub_linear = torch.nn.Linear(linear.in_features, len(group[i]))
+#            sub_linear.weight = torch.nn.Parameter(torch.squeeze(linear.weight[group[i], :]))
+#            print(sub_linear.weight.shape)
+#            if linear.bias != None:
+#                sub_linear.bias = torch.nn.Parameter(linear.bias[group[i]])
+#        else:
+#            '''拆分input'''
+#            sub_linear = torch.nn.Linear(
+#                len(group[i]), linear.out_features, bias=False)
+#            sub_linear.weight = torch.nn.Parameter(linear.weight[:, group[i]])
+#        # print(sub_linear.weight.shape)
+#        result.append(sub_linear)
     return result
 
 comm = MPI.COMM_WORLD
