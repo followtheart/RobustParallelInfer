@@ -80,32 +80,31 @@ def linear_sharding(linear: torch.nn.Linear = None, group=[], split_output: bool
         if split_output:
             '''拆分output'''
             sub_linear = torch.nn.Linear(linear.in_features, len(group[i]))
-            sub_linear.weight = torch.nn.Parameter(torch.squeeze(linear.weight[group[i], :]))
-            print(sub_linear.weight.shape)
-            if linear.bias != None:
-                sub_linear.bias = torch.nn.Parameter(linear.bias[group[i]])
+            sub_linear.weight = torch.nn.Parameter(torch.squeeze(linear.weight[group[i], :].clone()))
+            if linear.bias is not None:
+                sub_linear.bias = torch.nn.Parameter(torch.squeeze(linear.bias[group[i]].clone()))
         else:
             '''拆分input'''
-            sub_linear = torch.nn.Linear(
-                len(group[i]), linear.out_features, bias=False)
-            sub_linear.weight = torch.nn.Parameter(linear.weight[:, group[i]])
-        # print(sub_linear.weight.shape)
+            sub_linear = torch.nn.Linear(len(group[i]), linear.out_features, bias=False)
+            sub_linear.weight = torch.nn.Parameter(linear.weight[:, group[i]].clone())
+        
         result.append(sub_linear)
     return result
 
-
-nrank = 2
+comm = MPI.COMM_WORLD
+irank = comm.Get_rank()
+nrank = comm.Get_size()
 sub_graphs = []
-
 
 def generate_group(total_features=0, nranks=4):
     assert total_features % nranks == 0
     ret = []
     for i in range(nranks):
-        interval = total_features/nranks
-        start = int(i * interval)
-        ret.append([range(start, int(start+interval))])
+        interval = total_features // nranks  # Use integer division
+        start = i * interval
+        ret.append(list(range(start, start + interval)))  # Removed extra brackets
     return ret
+
 
 
 sub_graphs = []
@@ -118,7 +117,7 @@ def fix_arg(node:torch.fx.Node=None,replace_table:dict=dict()):
     return node
 
 def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
-    sub_graphs = [torch.fx.GraphModule(gm, torch.fx.Graph())
+    sub_graphs = [torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
                   for _ in range(nrank)]
     # gm.graph.print_tabular()
     gm.eval()
@@ -167,11 +166,14 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
                 new_node = fix_arg(node,replace_tables[i])
                 sub_graphs[i].graph.node_copy(new_node)
     for i in range(nrank):
-        sub_graphs[i].recompile()
-        sub_graphs[i].eval()
-        # sub_graphs[i].graph.print_tabular()
-        mod = torch.jit.trace(sub_graphs[i], [tokens_tensor])
-        mod.save('vicuna-7b-v1.5-'+str(i)+'.pt')
+        if i == irank:
+            sub_graphs[i].recompile()
+            sub_graphs[i].eval()
+            # sub_graphs[i].graph.print_tabular()
+            mod = torch.jit.trace(sub_graphs[i], [tokens_tensor])
+            mod.save('vicuna-7b-v1.5-'+str(i)+'.pt')
+            if irank == 0:
+                sub_graphs[i].graph.print_tabular()
 
     return gm.forward
 
@@ -182,10 +184,8 @@ def forward(input_ids):
     output = model.forward(input_ids)
     return output
 
-
 f_opt = forward(tokens_tensor)
 
-sub_graphs[0].graph.print_tabular()
 # print(f_opt)
 # Decode and print the generated text
 # generated_text = tokenizer.decode(f_opt[0], skip_special_tokens=True)
