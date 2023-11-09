@@ -31,7 +31,7 @@ tok_text = tokenizer.tokenize(DUMMY_TEXT)
 tokens = tokenizer.encode(DUMMY_TEXT)
 tok_arr = np.asarray(tokens).reshape(1, -1).astype(np.int32)
 tok_arr = np.pad(tok_arr, [(0, 0), (0, 128-tok_arr.shape[1])])
-tok_arr = np.repeat(tok_arr, 2, axis=0)
+#tok_arr = np.repeat(tok_arr, 2, axis=0)
 tokens_tensor = torch.from_numpy(tok_arr).to(device)
 # Export the program using the simple API.
 example_arg = tokens_tensor
@@ -67,7 +67,7 @@ flatbuffer_blob = ireec.compile_str(
     target_backends=["llvm-cpu"],
     # extra_args=flags,
 )
-with open(f"vit.vmfb", "wb+") as f:
+with open(f"llama-2-7b-hf.vmfb", "wb+") as f:
     f.write(flatbuffer_blob)
 
 '''

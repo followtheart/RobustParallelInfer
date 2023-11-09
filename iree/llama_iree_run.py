@@ -11,7 +11,7 @@ ctx.add_vm_module(vm_module)
 ModuleCompiled = getattr(ctx.modules, vm_module.name)
 print(ModuleCompiled)
 
-example_arg = torch.randn(1, 3, 224, 224)
+example_arg = torch.randint(10000,(1,128))
 start = time.time()
 results = ModuleCompiled["run"](example_arg.numpy())
 print("time cost: ", time.time()-start)
