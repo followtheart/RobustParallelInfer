@@ -3,7 +3,7 @@ import iree.compiler as ireec
 import iree.runtime as ireert
 import torch
 
-test_input = torch.randint(10000,[1,98])
+test_input = torch.randint(10000,[1,256])
 config = ireert.Config("local-task")
 ctx = ireert.SystemContext(config=config)
 vm_module = ireert.VmModule.mmap(
