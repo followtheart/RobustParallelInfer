@@ -14,6 +14,7 @@ import time
 iree_backend = "llvm-cpu"#"vmvx" #
 iree_input_type = "tm_tensor"
 # print(stages[0].mlir)
+torch.set_num_threads(6)
 models = dict()
 
 #计算图中间表示设计
@@ -49,8 +50,8 @@ class ExecutableUnit(Unit):
                                                 input_type=iree_input_type)
         self.ref=ray.put(iree_bytes) #store into ray store
     def upload_graph_to_ray(self):
-        self.graph_ref = ray.put(self.graph)
-
+        #self.graph_ref = ray.put(self.graph)
+        pass
     def run_on_ray(self,input):
         debug = False
         if debug:
@@ -60,6 +61,7 @@ class ExecutableUnit(Unit):
         # self.graph.graph.print_tabular()
         torch_only = True
         if torch_only:
+        #    print('ray graph_compute')
             return ray.get(self.worker.graph_compute
                         .remote(self.output,
                                 input,
@@ -303,7 +305,7 @@ class LinearStageShard(ExecutableUnit):
 
     def run_only_sharding(self,input):
         #重要开关：是否使用ray,开关：true,使用ray;false,单机
-        torch_only = False
+        torch_only = True 
         if torch_only:
             return self.run_on_ray(input)
         else:
@@ -500,7 +502,7 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
     sharding = False
     sub_graph = torch.fx.GraphModule(gm,torch.fx.Graph())
     # print(gm.get_parameter('G__model___embeddings_cls_token'))
-    # gm.graph.print_tabular()
+    #gm.graph.print_tabular()
     gm.eval()
     gm_env = dict()
     for node in gm.graph.nodes:  
@@ -523,7 +525,7 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
             stage = PipeStage(node.name,input_names,1,sub_graph,sharding=sharding)#创建stage
             # print(stage.__class__.__name__)
             stages.append(stage)        #添加到中间表示图中
-            # stage.graph.graph.print_tabular()
+            stage.graph.graph.print_tabular()
             #TODO:sub_graph.graph.lint()
 
             sub_graph = torch.fx.GraphModule(gm,torch.fx.Graph()) #创建新图
@@ -539,7 +541,7 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
     stage = PipeStage(node.name,input_names,1,sub_graph,sharding=sharding)#创建stage
     # print(stage.__class__.__name__)
     stages.append(stage)        #添加到中间表示图中
-    # stage.graph.graph.print_tabular()
+    stage.graph.graph.print_tabular()
 
     '''
     graph_mlir = torch_mlir.compile(gm, example_input, 
@@ -560,16 +562,17 @@ def stage_constructor(gm: torch.fx.GraphModule, example_inputs: List[torch.Tenso
     # assert
     return gm.forward
 
-import torch.fx
-from torch.fx.experimental.proxy_tensor import make_fx
+#import torch.fx
+
+#from torch.fx.experimental.proxy_tensor import make_fx
 # Define a function that applies the GPT-2 model
 @torch.compile(backend=stage_constructor)
 def forward(input_ids):
     outputs = model.forward(input_ids)
     return outputs
-
+#print('before')
 f_opt = forward(example_input)#compile all model
-
+#print('here') 
 def linear_sharding(linear:torch.nn.Linear=None,group=[],split_output:bool=True):
     '''Step 2.根据一个group对linear进行sharding'''
     result = list()
@@ -653,8 +656,8 @@ def transform_pipestage_into_pipestagewithlinear(pipestage:PipeStage)->PipeStage
 for i in range(12):
     att_stage = stages[i*2+1]
     ffn_stage = stages[i*2+2]
-    att_group = read_group('/home/jq/ncnn/tools/robust/group/vit/encoder_attention_'+str(i)+'_group.pkl')
-    ffn_group = read_group('/home/jq/ncnn/tools/robust/group/vit/encoder_ffn_'+str(i)+'_group.pkl')
+    att_group = read_group('/home/sky/cloud/jq/vitncnn/tools/robust/group/vit/encoder_attention_'+str(i)+'_group.pkl')
+    ffn_group = read_group('/home/sky/cloud/jq/vitncnn/tools/robust/group/vit/encoder_ffn_'+str(i)+'_group.pkl')
     q_name = 'g__model___encoder_layer_'+str(i)+'_attention_attention_query'
     k_name = 'g__model___encoder_layer_'+str(i)+'_attention_attention_key'
     v_name = 'g__model___encoder_layer_'+str(i)+'_attention_attention_value'
@@ -978,6 +981,9 @@ for i in range(12):
 3).lower to iree
 4).upload to ray store
 '''
+import os
+os.environ["OMP_NUM_THREADS"] = "6"
+ray.init()
 for i in range(len(stages)):
     if i in [0,1,2]:
         stage = stages[i]
@@ -1004,10 +1010,10 @@ t_rusult = model.forward(example_input)
 # print('graph result:',input[0])
 
 # exit(0)
-
-@ray.remote(num_cpus=4)
+@ray.remote(num_cpus=6)
 class Worker:
     def __init__(self) -> None:
+        torch.set_num_threads(6)
         self.models = dict()
         self.graphs = dict()
         '''单个worker支持的计算模型{id,指令引用}'''
@@ -1026,8 +1032,8 @@ class Worker:
         # self.models[model_id]  = ctx.modules.module
         # print(f'model:{model_id} added!')
         return True
-    def add_graph(self,graph_ref,model_id):
-        self.graphs[model_id] = graph_ref
+    def add_graph(self,graph,model_id):
+        self.graphs[model_id] = graph
         return True
     
     def graph_compute(self,model_id,input,multi_input:bool=False):
@@ -1089,6 +1095,7 @@ using_iree=False
 if using_iree:
     for i in range(num_workers):
         w = Worker.remote()
+        '''
         for j in range(len(stages)):
                 if isinstance(stages[j],PipeStage):
                     # print(f'adding stage {stages[j].output} ')
@@ -1102,10 +1109,12 @@ if using_iree:
                             for shard in sub_stage.shards:
                                 # print(f'adding stage {shard.output} ')
                                 init_rets.append(w.add_model.remote(shard.ref,shard.output))
+        '''
         workers.append(w)
 else:
     for i in range(num_workers):
         w = Worker.remote()
+        '''
         for j in range(len(stages)):
                 if isinstance(stages[j],PipeStage):
                     # print(f'adding stage {stages[j].output} ')
@@ -1119,9 +1128,10 @@ else:
                             for shard in sub_stage.shards:
                                 # print(f'adding stage {shard.output} ')
                                 init_rets.append(w.add_graph.remote(shard.graph_ref,shard.output))
+        '''
         workers.append(w)
    
-_ = ray.get(init_rets)
+# _ = ray.get(init_rets)
 
 
 #TODO:资源分配 worker-stage/shard 映射策略
@@ -1133,20 +1143,25 @@ for j in range(len(stages)):
     # current_worker = j%num_workers
     if isinstance(stages[j],PipeStage):
         # print(f'align stage: {stages[j].output} with worker: {current_worker}')
-        stages[j].worker=workers[0]#[current_worker] 
+        stages[j].worker=workers[0]#[current_worker]       
+        init_rets.append(workers[0].add_graph.remote(stages[j].graph,stages[j].output))
         current_worker= (current_worker+1)%num_workers       
     elif isinstance(stages[j],PipeStageWithLinear):
         for sub_stage in stages[j].stages:
             if isinstance(sub_stage,PipeStage):
                 # print(f'align stage: {sub_stage.output} with worker: {current_worker}')
-                sub_stage.worker=workers[0]#[current_worker] 
+                sub_stage.worker=workers[0]#[current_worker]          
+                init_rets.append(workers[0].add_graph.remote(sub_stage.graph,sub_stage.output))
                 current_worker= (current_worker+1)%num_workers 
             elif isinstance(sub_stage,LinearStage):
                 k = 0
                 for shard in sub_stage.shards:
                     # print(f'align stage: {shard.output} with worker:{k}')
                     shard.worker = workers[k]
+                    init_rets.append(workers[k].add_graph.remote(shard.graph,shard.output))
                     k = (k+1)%num_workers
+
+_ = ray.get(init_rets)
 
 
 '''linear stage,是抽象stage但是有自己的输入输出'''
